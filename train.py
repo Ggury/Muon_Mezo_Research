@@ -223,27 +223,28 @@ for epoch in range(epochs):
     for i, batch in enumerate(pbar):
         batch = {k: v.to(device) for k,v in batch.items()}
         t0 = time.time()
-        # if isinstance(optimizer_obj, MeZO):
-        #     torch.cuda.reset_peak_memory_stats()
-        #     raw_loss_item = optimizer_obj.step(model, batch)
-        #     peak_mem = torch.cuda.max_memory_allocated() / 1024**2
-        outputs = model(**batch)
-        raw_loss = outputs.loss
-        loss = outputs.loss / accumulation_steps
-        loss.backward()
+        if isinstance(optimizer_obj, MeZO):
+             torch.cuda.reset_peak_memory_stats()
+             raw_loss_item = optimizer_obj.step(model, batch)
+             peak_mem = torch.cuda.max_memory_allocated() / 1024**2
+        else:
+            outputs = model(**batch)
+            raw_loss = outputs.loss
+            loss = outputs.loss / accumulation_steps
+            loss.backward()
 
 
-        if (i + 1) % accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-            optim_muon.step()
-            if adam_params:
-                optim_adam.step()
+            if (i + 1) % accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                optim_muon.step()
+                if adam_params:
+                    optim_adam.step()
 
-            scheduler_muon.step()
+                scheduler_muon.step()
 
-            optim_muon.zero_grad()
-            if adam_params:
-                optim_adam.zero_grad()
+                optim_muon.zero_grad()
+                if adam_params:
+                    optim_adam.zero_grad()
         pbar.set_postfix(loss = raw_loss.item())
         history["loss"].append(raw_loss.item())
         if len(history["loss"]) % 100 == 0:
