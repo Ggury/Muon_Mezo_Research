@@ -1,0 +1,8 @@
+Passed argument batch_size = auto:1. Detecting largest batch size
+Determined largest batch size: 9
+hf ({'pretrained': './Qwen2.5-0.5B', 'peft': './qwen_lora_hybrid'}), gen_kwargs: ({}), limit: None, num_fewshot: None, batch_size: auto (9)
+|Tasks|Version|Filter|n-shot| Metric |   |Value |   |Stderr|
+|-----|------:|------|-----:|--------|---|-----:|---|-----:|
+|piqa |      1|none  |     0|acc     |↑  |0.7040|±  |0.0107|
+|     |       |none  |     0|acc_norm|↑  |0.7013|±  |0.0107|
+

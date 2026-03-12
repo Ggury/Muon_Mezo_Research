@@ -14,7 +14,7 @@ from MeZO import MeZO
 
 OPTIMIZERS = ("adamw", "muon", "mezo", "hybrid")
 
-MODEL_PATH = './Qwen2.5-0.5B'
+MODEL_PATH = './Qwen3-4B-Thinking-2507'
 
 ds = load_dataset("Elriggs/openwebtext-100k", split='train[:6%]')
 
@@ -35,7 +35,7 @@ _Loraconfig = LoraConfig(
     task_type="CAUSAL_LM"
     )
 
-sequence_length = 1024
+sequence_length = 2048
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def preprocessing():
@@ -61,11 +61,12 @@ def preprocessing():
 
 
 model = get_peft_model(model, _Loraconfig)
+model.print_trainable_parameters()
 
 
 def setup_optimizer(model, args, total_steps):
     if args.optimizer == "mezo":
-        return [MeZO(model.parameters(),lr=args.lr,eps=args.eps)], None
+        return [MeZO(model.parameters(),lr=args.lr,eps=args.eps)], [None]
 
     muon_params = []
     adam_params = []
@@ -73,20 +74,25 @@ def setup_optimizer(model, args, total_steps):
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if p.ndim>=2 and ("lora" in name):
+        if p.ndim>=2 and ("lora_A" in name):
             muon_params.append(p)
         else:
             adam_params.append(p)
     
+    print("Len of muon params: ", len(muon_params))
+
     optimizers = []
+    schedulers = []
     
     if args.optimizer == "muon":
         optimizers.append(Muon(model.parameters(), lr=args.lr))
-        scheduler = get_linear_schedule_with_warmup(optimizers[0], int(0.1*total_steps), total_steps)
+        scheduler = get_linear_schedule_with_warmup(optimizers[0], int(0.04*total_steps), total_steps)
+        schedulers.append(scheduler)
     
     elif args.optimizer == "adamw":
         optimizers.append(torch.optim.AdamW(model.parameters(), lr=args.lr))
-        scheduler = get_linear_schedule_with_warmup(optimizers[0], int(0.1*total_steps), total_steps)
+        scheduler = get_linear_schedule_with_warmup(optimizers[0], int(0.04*total_steps), total_steps)
+        schedulers.append(scheduler)
 
     elif args.optimizer == "hybrid":
         if muon_params:
@@ -94,26 +100,29 @@ def setup_optimizer(model, args, total_steps):
         if adam_params:
             optimizers.append(torch.optim.AdamW(adam_params, lr=args.lr * 0.1))
         
-        scheduler = get_linear_schedule_with_warmup(optimizers[0], int(0.1*total_steps), total_steps)
+        scheduler = get_linear_schedule_with_warmup(optimizers[0], int(0.04*total_steps), total_steps)
+        scheduler2 = get_linear_schedule_with_warmup(optimizers[1], int(0.04*total_steps), total_steps)
+        schedulers.append(scheduler)
+        schedulers.append(scheduler2)
     
-    return optimizers,scheduler
+    return optimizers,schedulers
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--optimizer", type=str, default="adamw", choices=OPTIMIZERS)
     parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--eps", type=float, default=1e-3) # Для MeZO
+    parser.add_argument("--eps", type=float, default=1e-3)
     parser.add_argument("--epochs", type=int, default=1)
     args = parser.parse_args()
 
 
     history = {
-    "config": vars(args), # Сохраняем все гиперпараметры из argparse
+    "config": vars(args),
     "lora_config": _Loraconfig.to_dict(),
     "loss": [],
     "stats": [],
-    "eval_results": {} # Сюда запишем результат PIQA позже
+    "eval_results": {}
 }
     
     model.to(device=device)
@@ -122,13 +131,13 @@ def main():
 
     train_dataset = preprocessing()
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-    micro_batch_size = 4
+    micro_batch_size = 1
     logical_batch_size = 32
     accumulation_steps = logical_batch_size // micro_batch_size
-    train_loader = DataLoader(train_dataset,batch_size=micro_batch_size, shuffle=True, collate_fn=data_collator, num_workers=4,pin_memory=True,prefetch_factor=2)
+    train_loader = DataLoader(train_dataset,batch_size=micro_batch_size, shuffle=True, collate_fn=data_collator, num_workers=2,pin_memory=True,prefetch_factor=2)
 
     total_steps = (len(train_loader) // accumulation_steps) * args.epochs
-    warmup_steps = int(0.1 * total_steps)
+    warmup_steps = int(0.03 * total_steps)
 
     optimizer_obj, scheduler = setup_optimizer(model=model, args = args, total_steps=total_steps)
 
@@ -160,8 +169,8 @@ def main():
                     for opt in optimizer_obj:
                         opt.step()
                         opt.zero_grad()
-
-                    scheduler.step()
+                    for sched in scheduler:
+                        sched.step()
 
                 peak_mem = torch.cuda.max_memory_allocated() / 1024**2
             
@@ -171,7 +180,12 @@ def main():
 
             history["loss"].append(current_loss)
 
-            current_lr = scheduler.get_last_lr()[0] if scheduler else args.lr
+            if args.optimizer == "hybrid":
+                lr_muon = scheduler[0].get_last_lr()[0]
+                lr_adam = scheduler[1].get_last_lr()[0]
+                current_lr = f"M:{lr_muon:.2e}|A:{lr_adam:.2e}"
+            else:
+                current_lr = f"{scheduler[0].get_last_lr()[0]:.2e}" if (scheduler and scheduler[0]) else f"{args.lr:.2e}"
 
             history["stats"].append({
                 "time": step_time,
@@ -187,8 +201,10 @@ def main():
             # history["stats"].append({"time": step_time, "memory": peak_mem})
 
             if len(history["loss"]) % 100 == 0:
-                with open(f"history{args.optimizer}.json", "w") as f:
-                    json.dump(history, f)
+                with open(f"history_{args.optimizer}.json", "w") as f:
+                    # default=str заставит JSON превращать сеты и другие объекты в строки
+                    json.dump(history, f, indent=4, default=str)
+            time.sleep(0.5)
 
     model.save_pretrained(f"qwen_lora_{args.optimizer}")
 
@@ -197,21 +213,21 @@ def main():
     import subprocess
 
     eval_cmd = [
-        "lm_eval", "--model", "hf",
-        "--model_args", f"pretrained={MODEL_PATH},peft=qwen_lora_{args.optimizer}",
+        "python3", "-m", "lm_eval", "run",  # Добавили 'run'
+        "--model", "hf",
+        "--model_args", f"pretrained={MODEL_PATH},peft=./qwen_lora_{args.optimizer}",
         "--tasks", "piqa",
-        "--device", str(device),
+        "--device", "cuda:0",
         "--batch_size", "auto"
     ]
-
     try:
         result = subprocess.run(eval_cmd, capture_output=True, text=True)
         # Парсим вывод (упрощенно) или просто сохраняем текст
         with open(f"eval_{args.optimizer}.txt", "w") as f:
             f.write(result.stdout)
-        print(f"✅ Оценка завершена. Результаты в eval_{args.optimizer}.txt")
+        print(f"Evaluating completed. Results are in eval_{args.optimizer}.txt")
     except Exception as e:
-        print(f"❌ Ошибка при запуске PIQA: {e}")
+        print(f"PIQA error: {e}")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,9 @@
 /.venv
 Qwen2.5-0.5B/
 gpu_debug_log.csv
+/qwen**
+**.png
+plots.py
+run.sh
+train_history.json
+__pycache__/

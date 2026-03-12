@@ -1,0 +1,1 @@
+{"config": {"optimizer": "adamw", "lr": 0.0005, "eps": 0.001, "epochs": 1}, "lora_config": {"task_type": "CAUSAL_LM", "peft_type": "LORA", "auto_mapping": null, "peft_version": "0.18.1", "base_model_name_or_path": "./Qwen2.5-0.5B", "revision": null, "inference_mode": false, "r": 32, "target_modules": 
